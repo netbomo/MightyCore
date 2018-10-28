@@ -20,100 +20,157 @@
   Boston, MA  02111-1307  USA
 */
 
+// to use timer2 instead of timer0 for millis() and micro() and free the timer0
+// #define CORE_USE_TIMER2
+
 #include "wiring_private.h"
 
+#ifdef CORE_USE_TIMER2
+// the prescaler is set so that timer2 ticks every 64 clock cycles, and the
+// the overflow handler is called every 256 ticks.
+#define MICROSECONDS_PER_TIMER2_OVERFLOW (clockCyclesToMicroseconds(64 * 256))
+#else
 // the prescaler is set so that timer0 ticks every 64 clock cycles, and the
 // the overflow handler is called every 256 ticks.
 #define MICROSECONDS_PER_TIMER0_OVERFLOW (clockCyclesToMicroseconds(64 * 256))
+#endif
 
+#ifdef CORE_USE_TIMER2
+// the whole number of milliseconds per timer2 overflow
+#define MILLIS_INC (MICROSECONDS_PER_TIMER2_OVERFLOW / 1000)
+#else
 // the whole number of milliseconds per timer0 overflow
 #define MILLIS_INC (MICROSECONDS_PER_TIMER0_OVERFLOW / 1000)
+#endif
 
+#ifdef CORE_USE_TIMER2
+// the fractional number of milliseconds per timer0 overflow. we shift right
+// by three to fit these numbers into a byte. (for the clock speeds we care
+// about - 8 and 16 MHz - this doesn't lose precision.)
+#define FRACT_INC ((MICROSECONDS_PER_TIMER2_OVERFLOW % 1000) >> 3)
+#else
 // the fractional number of milliseconds per timer0 overflow. we shift right
 // by three to fit these numbers into a byte. (for the clock speeds we care
 // about - 8 and 16 MHz - this doesn't lose precision.)
 #define FRACT_INC ((MICROSECONDS_PER_TIMER0_OVERFLOW % 1000) >> 3)
+#endif
 #define FRACT_MAX (1000 >> 3)
 
+#ifdef CORE_USE_TIMER2
+volatile unsigned long timer2_overflow_count = 0;
+volatile unsigned long timer2_millis = 0;
+static unsigned char timer2_fract = 0;
+#else
 volatile unsigned long timer0_overflow_count = 0;
 volatile unsigned long timer0_millis = 0;
 static unsigned char timer0_fract = 0;
+#endif
 
 #if defined(__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
 ISR(TIM0_OVF_vect)
 #else
+#ifdef CORE_USE_TIMER2
+ISR(TIMER2_OVF_vect)
+#else
 ISR(TIMER0_OVF_vect)
 #endif
 {
-  // copy these to local variables so they can be stored in registers
-  // (volatile variables must be read from memory on every access)
-  unsigned long m = timer0_millis;
-  unsigned char f = timer0_fract;
+	// copy these to local variables so they can be stored in registers
+	// (volatile variables must be read from memory on every access)
+#ifdef CORE_USE_TIMER2
+	unsigned long m = timer2_millis;
+	unsigned char f = timer2_fract;
+#else
+	unsigned long m = timer0_millis;
+	unsigned char f = timer0_fract;
+#endif
 
-  m += MILLIS_INC;
-  f += FRACT_INC;
-  if (f >= FRACT_MAX) {
-    f -= FRACT_MAX;
-    m += 1;
-  }
-
-  timer0_fract = f;
-  timer0_millis = m;
-  timer0_overflow_count++;
+	m += MILLIS_INC;
+	f += FRACT_INC;
+	if (f >= FRACT_MAX) {
+		f -= FRACT_MAX;
+		m += 1;
+	}
+#ifdef CORE_USE_TIMER2
+	timer2_fract = f;
+	timer2_millis = m;
+	timer2_overflow_count++;
+#else
+	timer0_fract = f;
+	timer0_millis = m;
+	timer0_overflow_count++;
+#endif
 }
 
 unsigned long millis()
 {
-  unsigned long m;
-  uint8_t oldSREG = SREG;
+	unsigned long m;
+	uint8_t oldSREG = SREG;
 
-  // disable interrupts while we read timer0_millis or we might get an
-  // inconsistent value (e.g. in the middle of a write to timer0_millis)
-  cli();
-  m = timer0_millis;
-  SREG = oldSREG;
+	// disable interrupts while we read timer0_millis or we might get an
+	// inconsistent value (e.g. in the middle of a write to timer0_millis)
+	cli();
+#ifdef CORE_USE_TIMER2
+	m = timer2_millis;
+#else
+	m = timer0_millis;
+#endif
+	SREG = oldSREG;
 
-  return m;
+	return m;
 }
 
 unsigned long micros() {
-  unsigned long m;
-  uint8_t oldSREG = SREG, t;
-  
-  cli();
-  m = timer0_overflow_count;
+	unsigned long m;
+	uint8_t oldSREG = SREG, t;
+
+	cli();
+#ifdef CORE_USE_TIMER2
+	m = timer2_overflow_count;
+#else
+	m = timer0_overflow_count;
+#endif
+#ifdef CORE_USE_TIMER2
+	t = TCNT2;
+#else
 #if defined(TCNT0)
-  t = TCNT0;
+	t = TCNT0;
 #elif defined(TCNT0L)
-  t = TCNT0L;
+	t = TCNT0L;
 #else
-  #error TIMER 0 not defined
+	#error TIMER 0 not defined
+#endif
 #endif
 
+#ifdef CORE_USE_TIMER2
+	if ((TIFR2 & _BV(TOV2)) && (t < 255))
+		m++;
+#else
 #ifdef TIFR0
-  if ((TIFR0 & _BV(TOV0)) && (t < 255))
-    m++;
+	if ((TIFR0 & _BV(TOV0)) && (t < 255))
+		m++;
 #else
-  if ((TIFR & _BV(TOV0)) && (t < 255))
-    m++;
+	if ((TIFR & _BV(TOV0)) && (t < 255))
+		m++;
+#endif
 #endif
 
-  SREG = oldSREG;
-  
-  return ((m << 8) + t) * (64 / clockCyclesPerMicrosecond());
+	SREG = oldSREG;
+
+	return ((m << 8) + t) * (64 / clockCyclesPerMicrosecond());
 }
 
 void delay(unsigned long ms)
 {
-  uint32_t start = micros();
+	uint32_t start = micros();
 
-  while (ms > 0) {
-    yield();
-    while ( ms > 0 && (micros() - start) >= 1000) {
-      ms--;
-      start += 1000;
-    }
-  }
+	while (ms > 0) {
+		yield();
+		while ( ms > 0 && (micros() - start) >= 1000) {
+			ms--;
+			start += 1000;
+		}
+	}
 }
 
 /* Delay for the given number of microseconds.  Assumes a 1, 8, 12, 16, 20 or 24 MHz clock. */
@@ -240,18 +297,26 @@ void delayMicroseconds(unsigned int us)
 
 void init()
 {
-  // this needs to be called before setup() or some functions won't
-  // work there
-  sei();
-  
-  // on the ATmega168, timer 0 is also used for fast hardware pwm
-  // (using phase-correct PWM would mean that timer 0 overflowed half as often
-  // resulting in different millis() behavior on the ATmega8 and ATmega168)
+	// this needs to be called before setup() or some functions won't
+	// work there
+	sei();
+
+	// IF CORE_USE_TIMER2, the timer0 is not initialize. But timer2 is set to be used by millis and micro
+#ifdef CORE_USE_TIMER2
+#else
+	// on the ATmega168, timer 0 is also used for fast hardware pwm
+	// (using phase-correct PWM would mean that timer 0 overflowed half as often
+	// resulting in different millis() behavior on the ATmega8 and ATmega168)
 #if defined(TCCR0A) && defined(WGM01)
-  sbi(TCCR0A, WGM01);
-  sbi(TCCR0A, WGM00);
+	sbi(TCCR0A, WGM01);
+	sbi(TCCR0A, WGM00);
+#endif
 #endif
 
+#ifdef CORE_USE_TIMER2
+	// // set timer 2 prescale factor to 64
+	sbi(TCCR2B, CS22);
+#else
   // set timer 0 prescale factor to 64
 #if defined(__AVR_ATmega64__) || defined(__AVR_ATmega128__)
   // CPU specific: different values for the ATmega64/128
@@ -278,13 +343,17 @@ void init()
   #error Timer 0 prescale factor 64 not set correctly
 #endif
 
-  // enable timer 0 overflow interrupt
+#ifdef CORE_USE_TIMER2
+	sbi(TIMSK2,TOIE2);
+#else
+	// enable timer 0 overflow interrupt
 #if defined(TIMSK) && defined(TOIE0)
   sbi(TIMSK, TOIE0);
 #elif defined(TIMSK0) && defined(TOIE0)
   sbi(TIMSK0, TOIE0);
 #else
-  #error  Timer 0 overflow interrupt not set correctly
+	#error	Timer 0 overflow interrupt not set correctly
+#endif
 #endif
 
   // timers 1 and 2 are used for phase-correct hardware pwm
@@ -311,7 +380,10 @@ void init()
   sbi(TCCR1A, WGM10);
 #endif
 
-  // set timer 2 prescale factor to 64
+#ifdef CORE_USE_TIMER2
+	// do not reinitialize timer 2
+#else
+	// set timer 2 prescale factor to 64
 #if defined(TCCR2) && defined(CS22)
   sbi(TCCR2, CS22);
 #elif defined(TCCR2B) && defined(CS22)
@@ -326,7 +398,8 @@ void init()
 #elif defined(TCCR2A) && defined(WGM20)
   sbi(TCCR2A, WGM20);
 //#else
-  // Timer 2 not finished (may not be present on this CPU)
+	// Timer 2 not finished (may not be present on this CPU)
+#endif
 #endif
 
 #if defined(TCCR3B) && defined(CS31) && defined(WGM30)

@@ -62,6 +62,9 @@ void yield(void);
 #define FALLING 2
 #define RISING 3
 
+//	On atmega1284p use timer2 for millis and micro to free timer0
+#define CORE_USE_TIMER2
+
 /* Analog reference definitions */
 
 // ATmega8535, ATmega8, ATmega16, ATmega32, ATmega64, ATmega128
